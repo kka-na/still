@@ -184,29 +184,36 @@ app.post('/api/categories/:id/export', (req, res) => {
   if (photos.length === 0) return res.status(400).json({ error: 'No photos to export' });
 
   const outputPath = path.join(UPLOADS_DIR, req.params.id, 'output.mp4');
-  const listFile = path.join(UPLOADS_DIR, req.params.id, 'filelist.txt');
+  const filterFile = path.join(UPLOADS_DIR, req.params.id, 'filter.txt');
 
-  // Build ffmpeg concat file
-  const lines = photos.map(f =>
-    `file '${path.join(photosDir, f).replace(/'/g, "'\\''")}'\nduration ${secondsPerFrame}`
-  );
-  // Append last file once more (ffmpeg needs it to render last frame duration)
-  lines.push(`file '${path.join(photosDir, photos[photos.length - 1]).replace(/'/g, "'\\''")}' `);
-  fs.writeFileSync(listFile, lines.join('\n'));
+  // Build ffmpeg input args: -loop 1 -t <duration> -i <file> for each photo
+  // This handles mixed resolutions by scaling every input to a uniform size
+  const inputArgs = photos.flatMap(f => [
+    '-loop', '1', '-t', String(secondsPerFrame),
+    '-i', path.join(photosDir, f)
+  ]);
+
+  // Build filter_complex: scale each input to 1080x1920, pad if needed, then concat
+  const filters = photos.map((_, i) =>
+    `[${i}:v]scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1[v${i}]`
+  ).join(';\n');
+  const concatInputs = photos.map((_, i) => `[v${i}]`).join('');
+  const filterComplex = `${filters};\n${concatInputs}concat=n=${photos.length}:v=1:a=0[out]`;
+  fs.writeFileSync(filterFile, filterComplex);
 
   try {
     execSync(
-      `ffmpeg -y -f concat -safe 0 -i "${listFile}" ` +
-      `-vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" ` +
+      `ffmpeg -y ${inputArgs.map(a => `"${a}"`).join(' ')} ` +
+      `-filter_complex_script "${filterFile}" -map "[out]" ` +
       `-c:v libx264 -preset fast -pix_fmt yuv420p "${outputPath}"`,
       { timeout: 300000 }
     );
   } catch (err) {
     console.error('ffmpeg error:', err.message);
     return res.status(500).json({ error: 'ffmpeg failed', detail: err.message });
+  } finally {
+    if (fs.existsSync(filterFile)) fs.unlinkSync(filterFile);
   }
-
-  if (fs.existsSync(listFile)) fs.unlinkSync(listFile);
 
   const cats = getCategories();
   const cat = cats.find(c => c.id === req.params.id);
@@ -219,6 +226,6 @@ app.use(express.static(path.join(__dirname, '../frontend/dist')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));});
 
-app.listen(2227, '0.0.0.0', () => {
-  console.log(`✦ STILL backend running on http://localhost:2227`);
+app.listen(49153, '0.0.0.0', () => {
+  console.log(`✦ STILL backend running on http://localhost:49153`);
 });
